@@ -45,29 +45,31 @@ def compute_matching_cost(Il, Ir, max_disp, H, W, ws, types, weights):
                 cost[h, w, disp] = LocalCost.compute_cost(
                     l_patch, r_patch, types, weights)
     return cost
+    
+
+def cost_aggregate(matching_cost):
+    return matching_cost
 
 
 def computeDisp(Il, Ir, max_disp):
-    window_size = 5
+    window_size = 3
     h, w, ch = Il.shape
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
     Ir = Ir.astype(np.float32)
     # >>> Cost computation
-    # TODO: Compute matching cost from Il and Ir
     matching_cost = compute_matching_cost(
         Il, Ir, max_disp, h, w, window_size, types=['L1'], weights=[1])
-    import pdb
-    pdb.set_trace()
 
   
     # >>> Cost aggregation
-    # TODO: Refine cost by aggregate nearby costs
+    matching_cost = cost_aggregate(matching_cost)
    
-
-    
     # >>> Disparity optimization
-    # TODO: Find optimal disparity based on estimated cost. Usually winner-take-all.
+    labels = np.argmin(matching_cost, -1)
+    matching_value = np.take_along_axis(
+        matching_cost, np.expand_dims(labels, -1), axis=-1).squeeze()
+    labels[np.isinf(matching_value)] = 0
 
 
     # >>> Disparity refinement
