@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import sys
 from sklearn.feature_extraction import image
 from tqdm import tqdm
+from functools import partial
 
 
 def visualize(img, fn):
@@ -18,13 +19,54 @@ def visualize(img, fn):
 
 class LocalCost:
     @staticmethod
-    def L1(l_patch, r_patch):
+    def L1(l_patch, r_patch, clip_val=100):
         cost = np.abs(l_patch - r_patch)
+        if clip_val is not None:
+            cost[cost > clip_val] = clip_val
         return cost
 
     @staticmethod
-    def L2(l_patch, r_patch):
+    def L2(l_patch, r_patch, clip_val=10000):
         cost = (l_patch - r_patch) ** 2
+        if clip_val is not None:
+            cost[cost > clip_val] = clip_val
+        return cost
+
+    def img_grad(img, axis='x'):
+        if axis == 'x':
+            return img[1:] - img[:-1]
+        elif axis == 'y':
+            return img[:, 1:] - img[:, :-1]
+        else:
+            raise Exception('Wrong img grad axis.')
+
+    @classmethod
+    def compute_L1_img_grad_cost(
+            cls, l_img, r_img, H, W, ws, max_disp, clip_val=50):
+        l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
+        r_img_gray = cv2.cvtColor(r_img, cv2.COLOR_RGB2GRAY)
+        l_img_x = cls.img_grad(l_img_gray)
+        l_img_y = cls.img_grad(l_img_gray, axis='y')
+        r_img_x = cls.img_grad(r_img_gray)
+        r_img_y = cls.img_grad(r_img_gray, axis='y')
+        pre_compute_x = cls.precompute(
+            l_img_x, r_img_x, max_disp,
+            partial(cls.L1, clip_val=clip_val))
+        pre_compute_y = cls.precompute(
+            l_img_y, r_img_y, max_disp,
+            partial(cls.L1, clip_val=clip_val))
+        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
+        for h in tqdm(range(ws, H - ws)):
+            for w in range(ws, W - ws):
+                for wl in range(w, min(w + max_disp + 1, W - ws)):
+                    disp = wl - w
+                    cost[h, wl, disp] = \
+                        np.sum(
+                            pre_compute_x[disp][h-ws:h+ws+1, wl-ws:wl+ws+1])
+                    + \
+                        np.sum(
+                            pre_compute_y[disp][h-ws:h+ws+1, wl-ws:wl+ws+1])
+
         return cost
 
     @classmethod
@@ -72,6 +114,9 @@ class LocalCost:
             elif one_type == 'L2':
                 cost = weight * cls.compute_L2_cost(
                     l_img, r_img, H, W, ws, max_disp)
+            elif one_type == 'L1_img_grad':
+                cost = weight * cls.compute_L1_img_grad_cost(
+                    l_img, r_img, H, W, ws, max_disp)
             else:
                 raise Exception('Not supported patch cost type.')
             if costs is None:
@@ -105,7 +150,9 @@ def computeDisp(Il, Ir, max_disp):
     Ir = Ir.astype(np.float32)
     # Cost computation
     matching_cost = LocalCost.compute_cost(
-        Il, Ir, h, w, window_size, max_disp, types=['L1'], weights=[1])
+        Il, Ir, h, w, window_size, max_disp,
+        types=['L1', 'L1_img_grad'],
+        weights=[0.5, 0.5])
   
     # Cost aggregation
     matching_cost = cost_aggregate(matching_cost)
