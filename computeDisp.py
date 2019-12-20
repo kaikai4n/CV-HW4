@@ -7,6 +7,15 @@ from sklearn.feature_extraction import image
 from tqdm import tqdm
 
 
+def visualize(img, fn):
+    inf_mask = np.isinf(img)
+    max_v = img[~inf_mask].max()
+    img = img * 255 / max_v
+    img = np.floor(img).astype(np.uint8)
+    img[inf_mask] = 255
+    cv2.imwrite(fn, img)
+
+
 class LocalCost:
     @staticmethod
     def L1(l_patch, r_patch):
@@ -21,7 +30,7 @@ class LocalCost:
     @classmethod
     def compute_L1_cost(cls, l_img, r_img, H, W, ws, max_disp):
         pre_compute = cls.precompute(l_img, r_img, max_disp, cls.L1)
-        cost = np.full((H, W, max_disp + 1), np.inf)
+        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
         for h in tqdm(range(ws, H - ws)):
             for w in range(ws, W - ws):
                 for wl in range(w, min(w + max_disp + 1, W - ws)):
@@ -33,7 +42,7 @@ class LocalCost:
     @classmethod
     def compute_L2_cost(cls, l_img, r_img, H, W, ws, max_disp):
         pre_compute = cls.precompute(l_img, r_img, max_disp, cls.L2)
-        cost = np.full((H, W, max_disp + 1), np.inf)
+        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
         for h in tqdm(range(ws, H - ws)):
             for w in range(ws, W - ws):
                 for wl in range(w, min(w + max_disp + 1, W - ws)):
@@ -72,34 +81,44 @@ class LocalCost:
         return costs
 
 
-def cost_aggregate(matching_cost):
+def cost_aggregate(matching_cost, types='bilateral'):
+    W = len(matching_cost)
+    if types == 'bilateral':
+        for w in range(W):
+            mask = np.isinf(matching_cost[w])
+            if np.sum(mask) > 0:
+                matching_cost[w][mask] = 10000
+                visualize(matching_cost[w], f'outputs/{w}_before.png')
+                matching_cost[w] = cv2.bilateralFilter(
+                    matching_cost[w], 9, 75, 75)
+                visualize(matching_cost[w], f'outputs/{w}_after.png')
+    else:
+        raise Exception("Not supported cost aggregation type.")
     return matching_cost
 
 
 def computeDisp(Il, Ir, max_disp):
-    window_size = 3
+    window_size = 5
     h, w, ch = Il.shape
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
     Ir = Ir.astype(np.float32)
-    # >>> Cost computation
+    # Cost computation
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp, types=['L1'], weights=[1])
-
   
-    # >>> Cost aggregation
+    # Cost aggregation
     matching_cost = cost_aggregate(matching_cost)
    
-    # >>> Disparity optimization
+    # Disparity optimization
     labels = np.argmin(matching_cost, -1)
     matching_value = np.take_along_axis(
         matching_cost, np.expand_dims(labels, -1), axis=-1).squeeze()
-    labels[np.isinf(matching_value)] = 0
+    labels[np.isinf(matching_value)] = 16
 
 
-    # >>> Disparity refinement
+    # Disparity refinement
     # TODO: Do whatever to enhance the disparity map
-    # ex: Left-right consistency check + hole filling + weighted median filtering
-
+    # Left right consistency check + hole filling + weighted median filtering
 
     return labels.astype(np.uint8)
