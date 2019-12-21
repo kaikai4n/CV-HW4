@@ -6,6 +6,7 @@ import sys
 from sklearn.feature_extraction import image
 from tqdm import tqdm
 from functools import partial
+from scipy.signal import convolve2d
 
 
 def visualize(img, fn):
@@ -100,25 +101,13 @@ class LocalCost:
     @classmethod
     def compute_L1_cost(cls, l_img, r_img, H, W, ws, max_disp):
         pre_compute = cls.precompute(l_img, r_img, max_disp, cls.L1)
-        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
-        for h in tqdm(range(ws, H - ws)):
-            for w in range(ws, W - ws):
-                for wl in range(w, min(w + max_disp + 1, W - ws)):
-                    disp = wl - w
-                    cost[h, wl, disp] = np.sum(
-                        pre_compute[disp][h-ws:h+ws+1, wl-ws:wl+ws+1])
+        cost = cls.fast_compute_disp_cost(H, W, ws, max_disp, pre_compute)
         return cost
 
     @classmethod
     def compute_L2_cost(cls, l_img, r_img, H, W, ws, max_disp):
         pre_compute = cls.precompute(l_img, r_img, max_disp, cls.L2)
-        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
-        for h in tqdm(range(ws, H - ws)):
-            for w in range(ws, W - ws):
-                for wl in range(w, min(w + max_disp + 1, W - ws)):
-                    disp = wl - w
-                    cost[h, wl, disp] = np.sum(
-                        pre_compute[disp][h-ws:h+ws+1, wl-ws:wl+ws+1])
+        cost = cls.fast_compute_disp_cost(H, W, ws, max_disp, pre_compute)
         return cost
 
     @staticmethod
@@ -127,8 +116,22 @@ class LocalCost:
         for disp in range(max_disp + 1):
             maps = loss_func(
                 r_img[:, :-disp] if disp != 0 else r_img, l_img[:, disp:])
+            maps = maps.sum(-1)
             pre_compute.append(maps)
         return pre_compute
+
+    @staticmethod
+    def fast_compute_disp_cost(H, W, ws, max_disp, pre_compute):
+        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
+        conv_kernel = np.ones((2*ws + 1, 2*ws + 1))
+        for disp in range(max_disp + 1):
+            disp_cost = convolve2d(pre_compute[disp], conv_kernel)
+            disp_cost = disp_cost[ws:-ws, ws:-ws]
+            if disp == 0:
+                cost[:, :, disp] = disp_cost
+            else:
+                cost[:, :-disp, disp] = disp_cost
+        return cost
 
     @classmethod
     def compute_cost(cls, l_img, r_img, H, W, ws, max_disp, types, weights):
