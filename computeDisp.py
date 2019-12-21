@@ -206,15 +206,25 @@ def consistency_check(labels_l, labels_r, max_disp, pix_tor=3):
     return invalid_mask
     
 
-def hole_filling(labels, invalid_mask):
+def hole_filling(labels, invalid_mask, left=True):
     H, W = labels.shape
     master_mask = invalid_mask.copy()
-    for move_pix in range(1, W):
-        work_mask = master_mask[:, move_pix:]
-        valid_mask = (invalid_mask[:, :-move_pix] == False) & work_mask
-        labels[:, move_pix:][valid_mask] = labels[:, :-move_pix][valid_mask]
-        master_mask[:, move_pix:][master_mask[:, move_pix:] & valid_mask] = \
-            False
+    if left:
+        for move_pix in range(1, W):
+            work_mask = master_mask[:, move_pix:]
+            valid_mask = (invalid_mask[:, :-move_pix] == False) & work_mask
+            labels[:, move_pix:][valid_mask] = \
+                labels[:, :-move_pix][valid_mask]
+            invalid_to_valid_mask = master_mask[:, move_pix:] & valid_mask
+            master_mask[:, move_pix:][invalid_to_valid_mask] = False
+    else:
+        for move_pix in range(1, W):
+            work_mask = master_mask[:, :-move_pix]
+            valid_mask = (invalid_mask[:, move_pix:] == False) & work_mask
+            labels[:, :-move_pix][valid_mask] = \
+                labels[:, move_pix:][valid_mask]
+            invalid_to_valid_mask = master_mask[:, :-move_pix] & valid_mask
+            master_mask[:, :-move_pix][invalid_to_valid_mask] = False
     return labels, master_mask
 
 
@@ -261,6 +271,11 @@ def computeDisp(Il, Ir, max_disp):
         weights=[1, 1, 1, 1],
         left_right_change=True)
     labels_r = np.argmin(matching_cost, -1)
+    invalid_mask_r = np.isinf(matching_value)
+
+    labels, invalid_mask = hole_filling(labels, invalid_mask)
+    labels_r, invalid_mask_r = hole_filling(
+        labels_r, invalid_mask_r, left=False)
     lr_invalid_mask = consistency_check(labels, labels_r, max_disp)
     
     invalid_mask |= lr_invalid_mask
