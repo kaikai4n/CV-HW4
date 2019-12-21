@@ -1,13 +1,8 @@
 import numpy as np
 import cv2
-import time
-import matplotlib.pyplot as plt
-import sys
 from cv2.ximgproc import weightedMedianFilter
 from functools import partial
 from scipy.signal import convolve2d
-from sklearn.feature_extraction import image
-from tqdm import tqdm
 
 
 def visualize(img, fn):
@@ -21,7 +16,7 @@ def visualize(img, fn):
 
 class LocalCost:
     @staticmethod
-    def L1(l_patch, r_patch, clip_val=50):
+    def L1(l_patch, r_patch, clip_val=10):
         cost = np.abs(l_patch - r_patch)
         if clip_val is not None:
             cost[cost > clip_val] = clip_val
@@ -35,16 +30,22 @@ class LocalCost:
         return cost
 
     def img_grad(img, axis='x'):
+        H, W = img.shape
         if axis == 'x':
-            return img[1:] - img[:-1]
+            img_grad = img[2:] - img[:-2]
+            pad = np.zeros((1, W))
+            img_grad = np.concatenate([pad, img_grad, pad], axis=0)
         elif axis == 'y':
-            return img[:, 1:] - img[:, :-1]
+            img_grad = img[:, 2:] - img[:, :-2]
+            pad = np.zeros((H, 1))
+            img_grad = np.concatenate([pad, img_grad, pad], axis=1)
         else:
             raise Exception('Wrong img grad axis.')
+        return img_grad
 
     @classmethod
     def compute_L1_edge_cost(
-            cls, l_img, r_img, H, W, ws, max_disp, clip_val=500,
+            cls, l_img, r_img, H, W, ws, max_disp, clip_val=10,
             left_right_change=False):
         l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
         r_img_gray = cv2.cvtColor(r_img, cv2.COLOR_RGB2GRAY)
@@ -64,7 +65,7 @@ class LocalCost:
 
     @classmethod
     def compute_L1_img_grad_cost(
-            cls, l_img, r_img, H, W, ws, max_disp, clip_val=50,
+            cls, l_img, r_img, H, W, ws, max_disp, clip_val=10,
             left_right_change=False):
         l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
         r_img_gray = cv2.cvtColor(r_img, cv2.COLOR_RGB2GRAY)
@@ -78,8 +79,7 @@ class LocalCost:
         pre_compute_y = cls.precompute(
             l_img_y, r_img_y, max_disp,
             partial(cls.L1, clip_val=clip_val), left_right_change)
-        pre_compute = [x[:, :-1] + y[:-1]
-                       for x, y in zip(pre_compute_x, pre_compute_y)]
+        pre_compute = [x + y for x, y in zip(pre_compute_x, pre_compute_y)]
         cost = cls.fast_compute_disp_cost(H, W, ws, max_disp, pre_compute)
         return cost
 
@@ -153,7 +153,8 @@ class LocalCost:
         return costs
 
 
-def cost_volume_smooth(matching_cost, types='bilateral', max_val=10000, **kwargs):
+def cost_volume_smooth(
+        matching_cost, types='bilateral', max_val=10000, **kwargs):
     W, H, max_disp_plus_one = matching_cost.shape
     if types == 'bilateral':
         for disp in range(max_disp_plus_one):
@@ -191,7 +192,7 @@ def consistency_check(labels_l, labels_r, max_disp, pix_tor=3):
         mask = mask_l & mask_r
         invalid_mask[:, disp:] |= mask
     return invalid_mask
-    
+
 
 def hole_filling(labels, invalid_mask, left=True):
     H, W = labels.shape
@@ -199,7 +200,7 @@ def hole_filling(labels, invalid_mask, left=True):
     if left:
         for move_pix in range(1, W):
             work_mask = master_mask[:, move_pix:]
-            valid_mask = (invalid_mask[:, :-move_pix] == False) & work_mask
+            valid_mask = ~invalid_mask[:, :-move_pix] & work_mask
             labels[:, move_pix:][valid_mask] = \
                 labels[:, :-move_pix][valid_mask]
             invalid_to_valid_mask = master_mask[:, move_pix:] & valid_mask
@@ -207,7 +208,7 @@ def hole_filling(labels, invalid_mask, left=True):
     else:
         for move_pix in range(1, W):
             work_mask = master_mask[:, :-move_pix]
-            valid_mask = (invalid_mask[:, move_pix:] == False) & work_mask
+            valid_mask = ~invalid_mask[:, move_pix:] & work_mask
             labels[:, :-move_pix][valid_mask] = \
                 labels[:, move_pix:][valid_mask]
             invalid_to_valid_mask = master_mask[:, :-move_pix] & valid_mask
@@ -228,15 +229,13 @@ def computeDisp(Il, Ir, max_disp):
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
     Ir = Ir.astype(np.float32)
-    Il_gray = cv2.cvtColor(Il, cv2.COLOR_BGR2GRAY)
     # Cost computation
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp,
-        types=['L1', 'L2', 'L1_edge', 'L1_img_grad'],
-        weights=[1, 1, 1, 1])
-  
+        types=['L1', 'L1_img_grad'],
+        weights=[8, 2])
+
     # Cost aggregation
-    mask = np.isinf(matching_cost)
     max_val = 1000
     cvs_r = 9
     cvs_eps = 100
@@ -244,28 +243,27 @@ def computeDisp(Il, Ir, max_disp):
         matching_cost, max_val=max_val,
         types='guided',
         guide=Il, radius=cvs_r, eps=cvs_eps)
-   
+
     # Disparity optimization
     labels = np.argmin(matching_cost, -1)
     matching_value = np.take_along_axis(
         matching_cost, np.expand_dims(labels, -1), axis=-1).squeeze()
     # labels[matching_value == max_val] = 0
-    
+
     # invalid_mask = matching_value == max_val
     invalid_mask = np.isinf(matching_value)
-
 
     # Disparity refinement
     matching_cost = LocalCost.compute_cost(
         Ir, Il, h, w, window_size, max_disp,
-        types=['L1', 'L2', 'L1_edge', 'L1_img_grad'],
-        weights=[1, 1, 1, 1],
+        types=['L1', 'L1_img_grad'],
+        weights=[8, 2],
         left_right_change=True)
     """
     matching_cost = cost_volume_smooth(
         matching_cost, max_val=max_val,
         types='guided',
-        guide=Il, radius=cvs_r, eps=cvs_eps)
+        guide=Ir, radius=cvs_r, eps=cvs_eps)
     """
     labels_r = np.argmin(matching_cost, -1)
     invalid_mask_r = np.isinf(matching_value)
@@ -275,7 +273,7 @@ def computeDisp(Il, Ir, max_disp):
         labels_r, invalid_mask_r, left=False)
     lr_invalid_mask = consistency_check(labels, labels_r, max_disp)
     invalid_mask |= lr_invalid_mask
-    
+
     print_invalid_img(Il, invalid_mask, 'invalid.png')
     labels, invalid_mask = hole_filling(labels, invalid_mask)
     print_invalid_img(Il, invalid_mask, 'invalid_after_hole_filling.png')
