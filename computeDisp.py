@@ -150,6 +150,14 @@ def cost_aggregate(matching_cost, types='bilateral'):
     return matching_cost
 
 
+def refine_disparity(labels):
+    labels = labels.astype(np.float32)
+    labels = cv2.medianBlur(labels, 7)
+    # labels = cv2.GaussianBlur(labels, (3, 3), 0)
+    labels = labels.astype(np.int32)
+    return labels
+
+
 def computeDisp(Il, Ir, max_disp):
     window_size = 2
     h, w, ch = Il.shape
@@ -177,5 +185,6 @@ def computeDisp(Il, Ir, max_disp):
     # Disparity refinement
     # TODO: Do whatever to enhance the disparity map
     # Left right consistency check + hole filling + weighted median filtering
+    labels = refine_disparity(labels)
 
     return labels.astype(np.uint8)
