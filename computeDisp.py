@@ -3,10 +3,11 @@ import cv2
 import time
 import matplotlib.pyplot as plt
 import sys
-from sklearn.feature_extraction import image
-from tqdm import tqdm
+from cv2.ximgproc import weightedMedianFilter
 from functools import partial
 from scipy.signal import convolve2d
+from sklearn.feature_extraction import image
+from tqdm import tqdm
 
 
 def visualize(img, fn):
@@ -165,12 +166,14 @@ def cost_aggregate(matching_cost, types='bilateral'):
     return matching_cost
 
 
-def refine_disparity(labels):
-    labels = labels.astype(np.float32)
-    labels = cv2.medianBlur(labels, 7)
+def refine_disparity(img, labels, **kwargs):
+    # labels = labels.astype(np.float32)
+    # labels = cv2.medianBlur(labels, 7)
     # labels = cv2.GaussianBlur(labels, (3, 3), 0)
-    labels = labels.astype(np.int32)
-    return labels
+    img_uint8 = img.astype(np.uint8)
+    labels = labels.astype(np.uint8)
+    out = weightedMedianFilter(img_uint8, labels, **kwargs)
+    return out
 
 
 def computeDisp(Il, Ir, max_disp):
@@ -200,6 +203,6 @@ def computeDisp(Il, Ir, max_disp):
     # Disparity refinement
     # TODO: Do whatever to enhance the disparity map
     # Left right consistency check + hole filling + weighted median filtering
-    labels = refine_disparity(labels)
+    labels = refine_disparity(Il, labels, r=30)
 
     return labels.astype(np.uint8)
