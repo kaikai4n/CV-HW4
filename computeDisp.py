@@ -19,14 +19,14 @@ def visualize(img, fn):
 
 class LocalCost:
     @staticmethod
-    def L1(l_patch, r_patch, clip_val=100):
+    def L1(l_patch, r_patch, clip_val=50):
         cost = np.abs(l_patch - r_patch)
         if clip_val is not None:
             cost[cost > clip_val] = clip_val
         return cost
 
     @staticmethod
-    def L2(l_patch, r_patch, clip_val=10000):
+    def L2(l_patch, r_patch, clip_val=1000):
         cost = (l_patch - r_patch) ** 2
         if clip_val is not None:
             cost[cost > clip_val] = clip_val
@@ -98,7 +98,7 @@ class LocalCost:
         pre_compute = []
         for disp in range(max_disp + 1):
             maps = loss_func(
-                r_img[:, disp:], l_img[:, :-disp] if disp != 0 else l_img)
+                r_img[:, :-disp] if disp != 0 else r_img, l_img[:, disp:])
             pre_compute.append(maps)
         return pre_compute
 
@@ -127,23 +127,31 @@ class LocalCost:
 
 
 def cost_aggregate(matching_cost, types='bilateral'):
-    W = len(matching_cost)
+    W, H, _ = matching_cost.shape
     if types == 'bilateral':
         for w in range(W):
             mask = np.isinf(matching_cost[w])
             if np.sum(mask) > 0:
                 matching_cost[w][mask] = 10000
-                visualize(matching_cost[w], f'outputs/{w}_before.png')
+                visualize(matching_cost[w], f'outputs/{w}_before_x.png')
                 matching_cost[w] = cv2.bilateralFilter(
                     matching_cost[w], 9, 75, 75)
-                visualize(matching_cost[w], f'outputs/{w}_after.png')
+                visualize(matching_cost[w], f'outputs/{w}_after_x.png')
+        for h in range(H):
+            mask = np.isinf(matching_cost[w])
+            if np.sum(mask) > 0:
+                matching_cost[:, h][mask] = 10000
+                visualize(matching_cost[:, h], f'outputs/{h}_before_y.png')
+                matching_cost[:, h] = cv2.bilateralFilter(
+                        matching_cost[:, h], 9, 75, 75)
+                visualize(matching_cost[:, h], f'outputs/{w}_after_y.png')
     else:
         raise Exception("Not supported cost aggregation type.")
     return matching_cost
 
 
 def computeDisp(Il, Ir, max_disp):
-    window_size = 5
+    window_size = 2
     h, w, ch = Il.shape
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
@@ -152,7 +160,9 @@ def computeDisp(Il, Ir, max_disp):
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp,
         types=['L1', 'L1_img_grad'],
-        weights=[0.5, 0.5])
+        weights=[1, 1])
+    # m_val = matching_cost[(0 < matching_cost) & ~np.isinf(matching_cost)]
+    # print(m_val.max(), m_val.min(), m_val.mean(), np.median(m_val))
   
     # Cost aggregation
     matching_cost = cost_aggregate(matching_cost)
@@ -161,7 +171,7 @@ def computeDisp(Il, Ir, max_disp):
     labels = np.argmin(matching_cost, -1)
     matching_value = np.take_along_axis(
         matching_cost, np.expand_dims(labels, -1), axis=-1).squeeze()
-    labels[np.isinf(matching_value)] = 16
+    labels[np.isinf(matching_value)] = 0
 
 
     # Disparity refinement
