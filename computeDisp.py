@@ -153,33 +153,20 @@ class LocalCost:
         return costs
 
 
-def cost_aggregate(matching_cost, types='bilateral', max_val=10000):
-    W, H, _ = matching_cost.shape
+def cost_volume_smooth(matching_cost, types='bilateral', max_val=10000, **kwargs):
+    W, H, max_disp_plus_one = matching_cost.shape
     if types == 'bilateral':
-        for w in range(W):
-            max_val_w = matching_cost[w][~np.isinf(matching_cost[w])]
-            max_val_w = max_val if max_val_w.size == 0 else max_val_w.max()
-            mask = matching_cost[w] > max_val_w
-            if np.sum(mask) > 0:
-                matching_cost[w][mask] = max_val_w
-            matching_cost[w] = matching_cost[w] * 255 / max_val
-            visualize(matching_cost[w], f'outputs/{w}_before_x.png')
-            matching_cost[w] = cv2.bilateralFilter(
-                matching_cost[w], 5, 100, 100)
-            visualize(matching_cost[w], f'outputs/{w}_after_x.png')
-        """
-        for h in range(H):
-            max_val_h = matching_cost[: h][~np.isinf(matching_cost[:, h])]
-            max_val_h = max_val if max_val_h.size == 0 else max_val_h.max()
-            mask = matching_cost[:, h] > max_val_h
-            if np.sum(mask) > 0:
-                matching_cost[:, h][mask] = max_val_h
-            matching_cost[:, h] = matching_cost[:, h] * 255 / max_val
-            visualize(matching_cost[:, h], f'outputs/{h}_before_y.png')
-            matching_cost[:, h] = cv2.bilateralFilter(
-                    matching_cost[:, h], 9, 75, 75)
-            visualize(matching_cost[:, h], f'outputs/{w}_after_y.png')
-        """
+        for disp in range(max_disp_plus_one):
+            mask = matching_cost[:, :, disp] > max_val
+            matching_cost[:, :, disp][mask] = max_val
+            matching_cost[:, :, disp] = cv2.bilateralFilter(
+                matching_cost[:, :, disp], 5, 50, 50)
+    elif types == 'guided':
+        for disp in range(max_disp_plus_one):
+            mask = matching_cost[:, :, disp] > max_val
+            matching_cost[:, :, disp][mask] = max_val
+            matching_cost[:, :, disp] = cv2.ximgproc.guidedFilter(
+                src=matching_cost[:, :, disp], **kwargs)
     else:
         raise Exception("Not supported cost aggregation type.")
     return matching_cost
@@ -241,6 +228,7 @@ def computeDisp(Il, Ir, max_disp):
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
     Ir = Ir.astype(np.float32)
+    Il_gray = cv2.cvtColor(Il, cv2.COLOR_BGR2GRAY)
     # Cost computation
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp,
@@ -250,7 +238,12 @@ def computeDisp(Il, Ir, max_disp):
     # Cost aggregation
     mask = np.isinf(matching_cost)
     max_val = 1000
-    # matching_cost = cost_aggregate(matching_cost, max_val=max_val)
+    cvs_r = 9
+    cvs_eps = 100
+    matching_cost = cost_volume_smooth(
+        matching_cost, max_val=max_val,
+        types='guided',
+        guide=Il, radius=cvs_r, eps=cvs_eps)
    
     # Disparity optimization
     labels = np.argmin(matching_cost, -1)
@@ -263,13 +256,17 @@ def computeDisp(Il, Ir, max_disp):
 
 
     # Disparity refinement
-    # TODO: Do whatever to enhance the disparity map
-    # Left right consistency check + hole filling + weighted median filtering
     matching_cost = LocalCost.compute_cost(
         Ir, Il, h, w, window_size, max_disp,
         types=['L1', 'L2', 'L1_edge', 'L1_img_grad'],
         weights=[1, 1, 1, 1],
         left_right_change=True)
+    """
+    matching_cost = cost_volume_smooth(
+        matching_cost, max_val=max_val,
+        types='guided',
+        guide=Il, radius=cvs_r, eps=cvs_eps)
+    """
     labels_r = np.argmin(matching_cost, -1)
     invalid_mask_r = np.isinf(matching_value)
 
@@ -277,13 +274,8 @@ def computeDisp(Il, Ir, max_disp):
     labels_r, invalid_mask_r = hole_filling(
         labels_r, invalid_mask_r, left=False)
     lr_invalid_mask = consistency_check(labels, labels_r, max_disp)
-    
     invalid_mask |= lr_invalid_mask
     
-    invalid_num = np.sum(invalid_mask)
-    total = matching_value.size
-    # print(f'{invalid_num} / {total} = {invalid_num / total}')
-
     print_invalid_img(Il, invalid_mask, 'invalid.png')
     labels, invalid_mask = hole_filling(labels, invalid_mask)
     print_invalid_img(Il, invalid_mask, 'invalid_after_hole_filling.png')
