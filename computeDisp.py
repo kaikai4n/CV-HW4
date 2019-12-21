@@ -41,6 +41,34 @@ class LocalCost:
             raise Exception('Wrong img grad axis.')
 
     @classmethod
+    def compute_L1_edge_cost(
+            cls, l_img, r_img, H, W, ws, max_disp, clip_val=500):
+        l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
+        r_img_gray = cv2.cvtColor(r_img, cv2.COLOR_RGB2GRAY)
+        l_img_x = cv2.Sobel(l_img_gray, -1, 1, 0)
+        l_img_y = cv2.Sobel(l_img_gray, -1, 0, 1)
+        r_img_x = cv2.Sobel(r_img_gray, -1, 1, 0)
+        r_img_y = cv2.Sobel(r_img_gray, -1, 0, 1)
+        pre_compute_x = cls.precompute(
+            l_img_x, r_img_x, max_disp,
+            partial(cls.L1, clip_val=clip_val))
+        pre_compute_y = cls.precompute(
+            l_img_y, r_img_y, max_disp,
+            partial(cls.L1, clip_val=clip_val))
+        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
+        for h in tqdm(range(ws, H - ws)):
+            for w in range(ws, W - ws):
+                for wl in range(w, min(w + max_disp + 1, W - ws)):
+                    disp = wl - w
+                    cost[h, wl, disp] = \
+                        np.sum(
+                            pre_compute_x[disp][h-ws:h+ws+1, wl-ws:wl+ws+1])
+                    + \
+                        np.sum(
+                            pre_compute_y[disp][h-ws:h+ws+1, wl-ws:wl+ws+1])
+        return cost
+
+    @classmethod
     def compute_L1_img_grad_cost(
             cls, l_img, r_img, H, W, ws, max_disp, clip_val=50):
         l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
@@ -117,6 +145,9 @@ class LocalCost:
             elif one_type == 'L1_img_grad':
                 cost = weight * cls.compute_L1_img_grad_cost(
                     l_img, r_img, H, W, ws, max_disp)
+            elif one_type == 'L1_edge':
+                cost = weight * cls.compute_L1_edge_cost(
+                    l_img, r_img, H, W, ws, max_disp)
             else:
                 raise Exception('Not supported patch cost type.')
             if costs is None:
@@ -167,8 +198,8 @@ def computeDisp(Il, Ir, max_disp):
     # Cost computation
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp,
-        types=['L1', 'L1_img_grad'],
-        weights=[1, 1])
+        types=['L1', 'L1_edge', 'L1_img_grad'],
+        weights=[3, 3, 1])
     # m_val = matching_cost[(0 < matching_cost) & ~np.isinf(matching_cost)]
     # print(m_val.max(), m_val.min(), m_val.mean(), np.median(m_val))
   
