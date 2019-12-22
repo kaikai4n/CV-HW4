@@ -1,17 +1,54 @@
-import numpy as np
 import cv2
+import numpy as np
+import os
 from cv2.ximgproc import weightedMedianFilter
 from functools import partial
 from scipy.signal import convolve2d
 
 
-def visualize(img, fn):
-    inf_mask = np.isinf(img)
-    max_v = img[~inf_mask].max()
-    img = img * 255 / max_v
-    img = np.floor(img).astype(np.uint8)
-    img[inf_mask] = 255
-    cv2.imwrite(fn, img)
+def visualize(img, fn, invalid_mask=None):
+
+    def normalize_img(ori_img, invalid_mask=None,
+                      invalid_mark=np.array([0, 0, 255])):
+        # input (H, W, 1) or (H, W, 3)
+        img = ori_img.copy()
+        inf_mask = np.isinf(img)
+        mask = inf_mask if invalid_mask is None else inf_mask | invalid_mask
+        max_val, min_val = img[~mask].max(), img[~mask].min()
+        img[~mask] = (img[~mask] - min_val) * 255 / (max_val - min_val)
+        if img.shape[2] == 1:
+            img = img.repeat(3, -1)
+            mask = mask.squeeze()
+        else:
+            mask = np.any(mask, -1)
+        img[mask] = invalid_mark
+        img = np.round(img).astype(np.uint8)
+        return img
+
+    if len(img.shape) == 2:
+        # disparity map
+        img = np.expand_dims(img, -1)
+        if len(invalid_mask.shape) == 2:
+            invalid_mask = np.expand_dims(invalid_mask, -1)
+        img = normalize_img(img, invalid_mask=invalid_mask)
+        cv2.imwrite(fn, img)
+    elif len(img.shape) == 3:
+        _, _, C = img.shape
+        if C == 3:
+            img = normalize_img(img, invalid_mask=invalid_mask)
+            cv2.imwrite(fn, img)
+        else:
+            for c in range(C):
+                img_c = np.expand_dims(img[:, :, c], -1)
+                img_c = normalize_img(img_c, invalid_mask=invalid_mask)
+                out_fn = os.path.join(
+                    os.path.dirname(fn),
+                    f'{os.path.basename(fn).split(".")[0]}_{c}'
+                    f'.{os.path.basename(fn).split(".")[1]}',
+                )
+                cv2.imwrite(out_fn, img_c)
+    else:
+        raise Exception(f'Visualize error: unsupported shape {img.shape}')
 
 
 class LocalCost:
@@ -234,6 +271,7 @@ def computeDisp(Il, Ir, max_disp):
         Il, Ir, h, w, window_size, max_disp,
         types=['L1', 'L1_img_grad'],
         weights=[8, 2])
+    visualize(matching_cost, 'outputs/a_mc/.png')
 
     # Cost aggregation
     max_val = 1000
@@ -242,7 +280,8 @@ def computeDisp(Il, Ir, max_disp):
     matching_cost = cost_volume_smooth(
         matching_cost, max_val=max_val,
         types='guided',
-        guide=Il, radius=cvs_r, eps=cvs_eps)
+        guide=Il, radius=cvs_r, eps=cvs_eps, dDepth=-1)
+    visualize(matching_cost, 'outputs/a_cvs/.png')
 
     # Disparity optimization
     labels = np.argmin(matching_cost, -1)
@@ -268,9 +307,11 @@ def computeDisp(Il, Ir, max_disp):
     labels_r = np.argmin(matching_cost, -1)
     invalid_mask_r = np.isinf(matching_value)
 
+    """
     labels, invalid_mask = hole_filling(labels, invalid_mask)
     labels_r, invalid_mask_r = hole_filling(
         labels_r, invalid_mask_r, left=False)
+    """
     lr_invalid_mask = consistency_check(labels, labels_r, max_disp)
     invalid_mask |= lr_invalid_mask
 
@@ -279,6 +320,6 @@ def computeDisp(Il, Ir, max_disp):
     print_invalid_img(Il, invalid_mask, 'invalid_after_hole_filling.png')
 
     labels = refine_disparity(
-        Il, labels, r=30, mask=~invalid_mask.astype(int))
+        Il, labels, r=30, sigma=25.5, mask=~invalid_mask.astype(int))
 
     return labels.astype(np.uint8)
