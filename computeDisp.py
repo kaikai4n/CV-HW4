@@ -11,13 +11,10 @@ def visualize(img, fn, invalid_mask=None):
     def normalize_img(ori_img, invalid_mask=None,
                       invalid_mark=np.array([0, 0, 255])):
         # input (H, W, 1) or (H, W, 3)
-        img = ori_img.copy()
+        img = ori_img.copy().astype(float)
         inf_mask = np.isinf(img)
         mask = inf_mask if invalid_mask is None else inf_mask | invalid_mask
-        if (~mask).sum() == 0:
-            max_val, min_val = img.max(), img.min()
-            img = (img - min_val) * 255 / (max_val - min_val)
-        else:
+        if (~mask).sum() > 0:
             max_val, min_val = img[~mask].max(), img[~mask].min()
             img[~mask] = (img[~mask] - min_val) * 255 / (max_val - min_val)
         if img.shape[2] == 1:
@@ -25,7 +22,7 @@ def visualize(img, fn, invalid_mask=None):
             mask = mask.squeeze()
         else:
             mask = np.any(mask, -1)
-        if (~mask).sum() > 0:
+        if mask.sum() > 0:
             img[mask] = invalid_mark
         img = np.round(img).astype(np.uint8)
         return img
@@ -33,7 +30,7 @@ def visualize(img, fn, invalid_mask=None):
     if len(img.shape) == 2:
         # disparity map
         img = np.expand_dims(img, -1)
-        if len(invalid_mask.shape) == 2:
+        if invalid_mask is not None and len(invalid_mask.shape) == 2:
             invalid_mask = np.expand_dims(invalid_mask, -1)
         img = normalize_img(img, invalid_mask=invalid_mask)
         cv2.imwrite(fn, img)
@@ -182,6 +179,12 @@ class LocalCost:
             max_val, left_right_change=False):
         assert len(types) == len(weights) > 0
         weights = weights / np.sum(weights)
+        if left_right_change:
+            l_img_tmp = cv2.flip(r_img.copy(), 1)
+            r_img_tmp = cv2.flip(l_img.copy(), 1)
+        else:
+            l_img_tmp = l_img.copy()
+            r_img_tmp = r_img.copy()
         costs = None
         for one_type, weight in zip(types, weights):
             if one_type == 'L1':
@@ -195,12 +198,14 @@ class LocalCost:
             else:
                 raise Exception('Not supported patch cost type.')
             cost = weight * compute_func(
-                l_img, r_img, H, W, ws, max_disp, max_val,
-                left_right_change=left_right_change)
+                l_img_tmp, r_img_tmp, H, W, ws, max_disp, max_val,
+                left_right_change=False)
             if costs is None:
                 costs = cost
             else:
                 costs += cost
+        if left_right_change:
+            costs = cv2.flip(costs, 1)
         return costs
 
 
@@ -274,11 +279,28 @@ def print_invalid_img(Il, invalid_mask, out_fn):
     cv2.imwrite(out_fn, invalid_img)
 
 
+def smooth_boundary(labels, max_disp, left=True):
+    s_labels = labels.copy()
+    if not left:
+        s_labels = cv2.flip(s_labels, 1)
+        s_labels = smooth_boundary(s_labels, max_disp, left=True)
+        s_labels = cv2.flip(s_labels, 1)
+        return s_labels
+    for disp in range(max_disp+1):
+        mask = labels[:, disp] < int(max_disp / 4)
+        s_labels[mask, disp] = np.median(
+            labels[:, disp:max_disp + disp + 1], 1)[mask]
+    return s_labels
+
+
 def computeDisp(Il, Ir, max_disp):
     window_size = 4
     max_val = 1000
     mc_types = ['L1', 'L1_img_grad', 'L1_edge', 'L2']
     mc_weights = [8, 2, 5, 2]
+    cvs_r = 14
+    cvs_eps = 50
+    cc_pix_tor = 10
     h, w, ch = Il.shape
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
@@ -287,52 +309,56 @@ def computeDisp(Il, Ir, max_disp):
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp,
         types=mc_types, weights=mc_weights, max_val=max_val)
-    # visualize(matching_cost, 'outputs/a_mc/.png')
 
-    # Cost aggregation
-    cvs_r = 14
-    cvs_eps = 50
+    # Cost smoothing
     matching_cost = cost_volume_smooth(
         matching_cost, max_val=max_val,
         types='guided',
         guide=Il, radius=cvs_r, eps=cvs_eps, dDepth=-1)
-    # visualize(matching_cost, 'outputs/a_cvs/.png')
 
-    # Disparity optimization
+    # Cost aggregation
     labels = np.argmin(matching_cost, -1)
     matching_value = np.take_along_axis(
         matching_cost, np.expand_dims(labels, -1), axis=-1).squeeze()
-    invalid_mask = matching_value == max_val
-    labels = refine_disparity(
-        Il, labels, r=15, sigma=25.5, mask=~invalid_mask.astype(int))
+    invalid_mask = matching_value > max_val
+    labels, invalid_mask = hole_filling(labels, invalid_mask)
+    labels = smooth_boundary(labels, max_disp)
+    visualize(labels, 'outputs/left.png')
 
-    return labels.astype(np.uint8)
+    # Disparity optimization
 
-    # Disparity refinement
-    matching_cost = LocalCost.compute_cost(
-        Ir, Il, h, w, window_size, max_disp,
+    # Left right consistency check
+    # Compute right cost volume
+    matching_cost_r = LocalCost.compute_cost(
+        Il, Ir, h, w, window_size, max_disp,
         types=mc_types, weights=mc_weights, max_val=max_val,
         left_right_change=True)
-    """
-    matching_cost = cost_volume_smooth(
-        matching_cost, max_val=max_val,
+    matching_cost_r = cost_volume_smooth(
+        matching_cost_r, max_val=max_val,
         types='guided',
-        guide=Ir, radius=cvs_r, eps=cvs_eps)
-    """
-    labels_r = np.argmin(matching_cost, -1)
-    invalid_mask_r = np.isinf(matching_value)
+        guide=Ir, radius=cvs_r, eps=cvs_eps, dDepth=-1)
+    labels_r = np.argmin(matching_cost_r, -1)
 
-    """
-    labels, invalid_mask = hole_filling(labels, invalid_mask)
-    labels_r, invalid_mask_r = hole_filling(
-        labels_r, invalid_mask_r, left=False)
-    """
-    lr_invalid_mask = consistency_check(labels, labels_r, max_disp)
+    # DEBUG
+    matching_value_r = np.take_along_axis(
+        matching_cost, np.expand_dims(labels_r, -1), axis=-1).squeeze()
+    invalid_mask_r = matching_value_r > max_val
+    labels_r, invalid_mask_r = hole_filling(labels_r, invalid_mask_r)
+    labels_r = refine_disparity(
+        Ir, labels_r, r=15, sigma=25.5, mask=~invalid_mask_r.astype(int))
+    labels_r = smooth_boundary(labels_r, max_disp)
+    visualize(labels_r, 'outputs/right.png')
+    # END DEBUG
+
+    lr_invalid_mask = consistency_check(
+        labels, labels_r, max_disp, pix_tor=cc_pix_tor)
     invalid_mask |= lr_invalid_mask
-
-    print_invalid_img(Il, invalid_mask, 'invalid.png')
+    print(invalid_mask.sum(), invalid_mask.size)
+    visualize(labels, 'outputs/invalid_pix.png', invalid_mask)
     labels, invalid_mask = hole_filling(labels, invalid_mask)
-    print_invalid_img(Il, invalid_mask, 'invalid_after_hole_filling.png')
+    print(invalid_mask.sum(), invalid_mask.size)
+
+    labels = smooth_boundary(labels, max_disp)
 
     labels = refine_disparity(
         Il, labels, r=15, sigma=25.5, mask=~invalid_mask.astype(int))
