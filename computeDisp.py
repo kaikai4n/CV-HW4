@@ -65,7 +65,7 @@ class LocalCost:
         return cost
 
     @staticmethod
-    def L2(l_patch, r_patch, clip_val=1000):
+    def L2(l_patch, r_patch, clip_val=5):
         cost = (l_patch - r_patch) ** 2
         if clip_val is not None:
             cost[cost > clip_val] = clip_val
@@ -110,7 +110,7 @@ class LocalCost:
     @classmethod
     def compute_L1_img_grad_cost(
             cls, l_img, r_img, H, W, ws,
-            max_disp, max_val, clip_val=11,
+            max_disp, max_val, clip_val=5,
             left_right_change=False):
         l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
         r_img_gray = cv2.cvtColor(r_img, cv2.COLOR_RGB2GRAY)
@@ -276,17 +276,17 @@ def print_invalid_img(Il, invalid_mask, out_fn):
 
 def computeDisp(Il, Ir, max_disp):
     window_size = 4
+    max_val = 1000
+    mc_types = ['L1', 'L1_img_grad', 'L1_edge', 'L2']
+    mc_weights = [8, 2, 5, 2]
     h, w, ch = Il.shape
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
     Ir = Ir.astype(np.float32)
-    max_val = 800
     # Cost computation
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp,
-        types=['L1', 'L1_img_grad'],
-        weights=[8, 2],
-        max_val=max_val)
+        types=mc_types, weights=mc_weights, max_val=max_val)
     # visualize(matching_cost, 'outputs/a_mc/.png')
 
     # Cost aggregation
@@ -311,9 +311,7 @@ def computeDisp(Il, Ir, max_disp):
     # Disparity refinement
     matching_cost = LocalCost.compute_cost(
         Ir, Il, h, w, window_size, max_disp,
-        types=['L1', 'L1_img_grad'],
-        weights=[8, 2],
-        max_val=max_val,
+        types=mc_types, weights=mc_weights, max_val=max_val,
         left_right_change=True)
     """
     matching_cost = cost_volume_smooth(
