@@ -14,14 +14,19 @@ def visualize(img, fn, invalid_mask=None):
         img = ori_img.copy()
         inf_mask = np.isinf(img)
         mask = inf_mask if invalid_mask is None else inf_mask | invalid_mask
-        max_val, min_val = img[~mask].max(), img[~mask].min()
-        img[~mask] = (img[~mask] - min_val) * 255 / (max_val - min_val)
+        if (~mask).sum() == 0:
+            max_val, min_val = img.max(), img.min()
+            img = (img - min_val) * 255 / (max_val - min_val)
+        else:
+            max_val, min_val = img[~mask].max(), img[~mask].min()
+            img[~mask] = (img[~mask] - min_val) * 255 / (max_val - min_val)
         if img.shape[2] == 1:
             img = img.repeat(3, -1)
             mask = mask.squeeze()
         else:
             mask = np.any(mask, -1)
-        img[mask] = invalid_mark
+        if (~mask).sum() > 0:
+            img[mask] = invalid_mark
         img = np.round(img).astype(np.uint8)
         return img
 
@@ -53,7 +58,7 @@ def visualize(img, fn, invalid_mask=None):
 
 class LocalCost:
     @staticmethod
-    def L1(l_patch, r_patch, clip_val=10):
+    def L1(l_patch, r_patch, clip_val=3):
         cost = np.abs(l_patch - r_patch)
         if clip_val is not None:
             cost[cost > clip_val] = clip_val
@@ -82,7 +87,8 @@ class LocalCost:
 
     @classmethod
     def compute_L1_edge_cost(
-            cls, l_img, r_img, H, W, ws, max_disp, clip_val=10,
+            cls, l_img, r_img, H, W, ws,
+            max_disp, max_val, clip_val=10,
             left_right_change=False):
         l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
         r_img_gray = cv2.cvtColor(r_img, cv2.COLOR_RGB2GRAY)
@@ -97,12 +103,14 @@ class LocalCost:
             l_img_y, r_img_y, max_disp,
             partial(cls.L1, clip_val=clip_val), left_right_change)
         pre_compute = [x + y for x, y in zip(pre_compute_x, pre_compute_y)]
-        cost = cls.fast_compute_disp_cost(H, W, ws, max_disp, pre_compute)
+        cost = cls.fast_compute_disp_cost(
+            H, W, ws, max_disp, pre_compute, max_val)
         return cost
 
     @classmethod
     def compute_L1_img_grad_cost(
-            cls, l_img, r_img, H, W, ws, max_disp, clip_val=10,
+            cls, l_img, r_img, H, W, ws,
+            max_disp, max_val, clip_val=11,
             left_right_change=False):
         l_img_gray = cv2.cvtColor(l_img, cv2.COLOR_BGR2GRAY)
         r_img_gray = cv2.cvtColor(r_img, cv2.COLOR_RGB2GRAY)
@@ -117,55 +125,61 @@ class LocalCost:
             l_img_y, r_img_y, max_disp,
             partial(cls.L1, clip_val=clip_val), left_right_change)
         pre_compute = [x + y for x, y in zip(pre_compute_x, pre_compute_y)]
-        cost = cls.fast_compute_disp_cost(H, W, ws, max_disp, pre_compute)
+        cost = cls.fast_compute_disp_cost(
+            H, W, ws, max_disp, pre_compute, max_val)
         return cost
 
     @classmethod
     def compute_L1_cost(
-            cls, l_img, r_img, H, W, ws, max_disp, left_right_change):
+            cls, l_img, r_img, H, W, ws,
+            max_disp, max_val, left_right_change):
         pre_compute = cls.precompute(
             l_img, r_img, max_disp, cls.L1, left_right_change)
-        cost = cls.fast_compute_disp_cost(H, W, ws, max_disp, pre_compute)
+        cost = cls.fast_compute_disp_cost(
+            H, W, ws, max_disp, pre_compute, max_val)
         return cost
 
     @classmethod
     def compute_L2_cost(
-            cls, l_img, r_img, H, W, ws, max_disp, left_right_change):
+            cls, l_img, r_img, H, W, ws,
+            max_disp, max_val, left_right_change):
         pre_compute = cls.precompute(
             l_img, r_img, max_disp, cls.L2, left_right_change)
-        cost = cls.fast_compute_disp_cost(H, W, ws, max_disp, pre_compute)
+        cost = cls.fast_compute_disp_cost(
+            H, W, ws, max_disp, pre_compute, max_val)
         return cost
 
     @staticmethod
     def precompute(l_img, r_img, max_disp, loss_func, left_right_change):
         pre_compute = []
         for disp in range(max_disp + 1):
-            if left_right_change:
+            if not left_right_change:
                 maps = loss_func(
-                    r_img[:, disp:], l_img[:, :-disp] if disp != 0 else l_img)
+                    l_img[:, disp:], r_img[:, :-disp] if disp != 0 else r_img)
             else:
                 maps = loss_func(
-                    r_img[:, :-disp] if disp != 0 else r_img, l_img[:, disp:])
+                    l_img[:, :-disp] if disp != 0 else l_img, r_img[:, disp:])
             while len(maps.shape) > 2:
                 maps = maps.sum(-1)
             pre_compute.append(maps)
         return pre_compute
 
     @staticmethod
-    def fast_compute_disp_cost(H, W, ws, max_disp, pre_compute):
-        cost = np.full((H, W, max_disp + 1), np.inf, dtype=np.float32)
+    def fast_compute_disp_cost(H, W, ws, max_disp, pre_compute, max_val):
+        cost = np.full((H, W, max_disp + 1), max_val, dtype=np.float32)
         conv_kernel = np.ones((2*ws + 1, 2*ws + 1))
         for disp in range(max_disp + 1):
             disp_cost = convolve2d(pre_compute[disp], conv_kernel)
-            disp_cost = disp_cost[ws:-ws, ws:-ws]
             d_H, d_W = disp_cost.shape
-            cost[:d_H, :d_W, disp] = disp_cost
+            disp_cost = disp_cost[ws:d_H-ws, ws:d_W-ws]
+            d_H, d_W = disp_cost.shape
+            cost[:d_H, disp:d_W+disp, disp] = disp_cost
         return cost
 
     @classmethod
     def compute_cost(
             cls, l_img, r_img, H, W, ws, max_disp, types, weights,
-            left_right_change=False):
+            max_val, left_right_change=False):
         assert len(types) == len(weights) > 0
         weights = weights / np.sum(weights)
         costs = None
@@ -181,7 +195,7 @@ class LocalCost:
             else:
                 raise Exception('Not supported patch cost type.')
             cost = weight * compute_func(
-                l_img, r_img, H, W, ws, max_disp,
+                l_img, r_img, H, W, ws, max_disp, max_val,
                 left_right_change=left_right_change)
             if costs is None:
                 costs = cost
@@ -261,42 +275,45 @@ def print_invalid_img(Il, invalid_mask, out_fn):
 
 
 def computeDisp(Il, Ir, max_disp):
-    window_size = 2
+    window_size = 4
     h, w, ch = Il.shape
     labels = np.zeros((h, w), dtype=np.float32)
     Il = Il.astype(np.float32)
     Ir = Ir.astype(np.float32)
+    max_val = 800
     # Cost computation
     matching_cost = LocalCost.compute_cost(
         Il, Ir, h, w, window_size, max_disp,
         types=['L1', 'L1_img_grad'],
-        weights=[8, 2])
-    visualize(matching_cost, 'outputs/a_mc/.png')
+        weights=[8, 2],
+        max_val=max_val)
+    # visualize(matching_cost, 'outputs/a_mc/.png')
 
     # Cost aggregation
-    max_val = 1000
-    cvs_r = 9
-    cvs_eps = 100
+    cvs_r = 14
+    cvs_eps = 50
     matching_cost = cost_volume_smooth(
         matching_cost, max_val=max_val,
         types='guided',
         guide=Il, radius=cvs_r, eps=cvs_eps, dDepth=-1)
-    visualize(matching_cost, 'outputs/a_cvs/.png')
+    # visualize(matching_cost, 'outputs/a_cvs/.png')
 
     # Disparity optimization
     labels = np.argmin(matching_cost, -1)
     matching_value = np.take_along_axis(
         matching_cost, np.expand_dims(labels, -1), axis=-1).squeeze()
-    # labels[matching_value == max_val] = 0
+    invalid_mask = matching_value == max_val
+    labels = refine_disparity(
+        Il, labels, r=15, sigma=25.5, mask=~invalid_mask.astype(int))
 
-    # invalid_mask = matching_value == max_val
-    invalid_mask = np.isinf(matching_value)
+    return labels.astype(np.uint8)
 
     # Disparity refinement
     matching_cost = LocalCost.compute_cost(
         Ir, Il, h, w, window_size, max_disp,
         types=['L1', 'L1_img_grad'],
         weights=[8, 2],
+        max_val=max_val,
         left_right_change=True)
     """
     matching_cost = cost_volume_smooth(
@@ -320,6 +337,6 @@ def computeDisp(Il, Ir, max_disp):
     print_invalid_img(Il, invalid_mask, 'invalid_after_hole_filling.png')
 
     labels = refine_disparity(
-        Il, labels, r=30, sigma=25.5, mask=~invalid_mask.astype(int))
+        Il, labels, r=15, sigma=25.5, mask=~invalid_mask.astype(int))
 
     return labels.astype(np.uint8)
